@@ -3,8 +3,14 @@
 
 import os
 import sys
+from openai import OpenAI
 
 GROQ_KEY_FILE = "groq_key.md"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_MODEL = "whisper-large-v3-turbo"
+
+SUPPORTED_FORMATS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".webm"}
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
 
 
 def load_api_key() -> str:
@@ -21,6 +27,48 @@ def load_api_key() -> str:
         sys.exit(1)
 
     return key
+
+
+def seconds_to_mmss(seconds: float) -> str:
+    """将秒数转换为 MM:SS 格式。"""
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def transcribe_file(client: OpenAI, audio_path: str) -> list | None:
+    """转写单个音频文件，返回 segments 列表。失败或不支持时返回 None。"""
+    ext = os.path.splitext(audio_path)[1].lower()
+    if ext not in SUPPORTED_FORMATS:
+        print(f"  跳过: 不支持的格式 {ext}")
+        return None
+
+    size = os.path.getsize(audio_path)
+    if size > MAX_FILE_SIZE:
+        size_mb = size / (1024 * 1024)
+        print(f"  错误: 文件大小 {size_mb:.1f}MB 超过 25MB 限制，跳过")
+        return None
+
+    with open(audio_path, "rb") as f:
+        transcription = client.audio.transcriptions.create(
+            model=GROQ_MODEL,
+            file=f,
+            response_format="verbose_json",
+            language="zh",
+        )
+
+    return transcription.segments
+
+
+def format_markdown(segments: list, filename: str) -> str:
+    """将 segments 格式化为带时间戳的 Markdown。"""
+    name = os.path.splitext(os.path.basename(filename))[0]
+    lines = [f"# {name}", ""]
+    for seg in segments:
+        timestamp = seconds_to_mmss(seg.start)
+        lines.append(f"**{timestamp}** {seg.text.strip()}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

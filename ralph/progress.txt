@@ -5,10 +5,24 @@ Started: Wed May  6 10:00:00 CST 2026
 - API key stored in `groq_key.md` first line, read via `load_api_key()` in `main.py`
 - Groq API accessed via `openai.OpenAI` client with custom `base_url`
 - PRD stored in `ralph/prd.json`, progress in `ralph/progress.txt`
+- Transcription via `client.audio.transcriptions.create(model, file, response_format='verbose_json', language='zh')` returns object with `.segments`
+- Timestamps formatted as `**MM:SS**` using `seconds_to_mmss()` helper
+- `SUPPORTED_FORMATS` and `MAX_FILE_SIZE` constants at module level for easy reference
 
 ---
 
-## 2026-05-06 10:50 - US-001
+## 2026-05-06 11:00 - US-002
+- Added `transcribe_file()` — sends audio to Groq Whisper API, returns segments
+- Added `seconds_to_mmss()` — converts float seconds to MM:SS formatted string
+- Added `format_markdown()` — converts segments to Markdown with h1 title and timestamped paragraphs
+- Added module-level constants: `SUPPORTED_FORMATS`, `MAX_FILE_SIZE`, `GROQ_MODEL`, `GROQ_BASE_URL`
+- File size check (25MB limit) and format validation in `transcribe_file()`
+- **Learnings for future iterations:**
+  - `client.audio.transcriptions.create()` with `response_format='verbose_json'` returns an object with `.segments` attribute
+  - Each segment has `.start`, `.end`, `.text` fields; `.start` is used for the MM:SS timestamp
+  - The openai library works with Groq by setting `base_url="https://api.groq.com/openai/v1"`
+---
+
 - Created `requirements.txt` with `openai>=1.0.0` dependency
 - Created `main.py` with `load_api_key()` function reading from `groq_key.md`
 - Created `README.md` with install and usage instructions

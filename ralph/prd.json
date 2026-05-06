@@ -32,7 +32,7 @@
         "脚本无 import 或语法错误"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
