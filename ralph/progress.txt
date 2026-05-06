@@ -32,3 +32,15 @@ Started: Wed May  6 10:00:00 CST 2026
   - System Python (PEP 668) requires `--break-system-packages` for pip install; consider venv for production use
   - `openai>=2.0` uses new client interface, compatible with `https://api.groq.com/openai/v1` base_url
 ---
+
+## 2026-05-06 12:00 - US-003
+- Added `scan_audio_files()` — scans input/ directory for supported formats, returns sorted paths
+- Added `batch_transcribe()` — orchestrates full batch flow: scan → transcribe → save → retry
+- Retry: failures collected after first pass, retried up to 2 rounds with 2s delay
+- Updated `__main__` block to create OpenAI client, call `batch_transcribe()`, print summary
+- Added module-level constants: `INPUT_DIR`, `OUTPUT_DIR`, `MAX_RETRY_ROUNDS`, `RETRY_DELAY`
+- **Learnings for future iterations:**
+  - `os.makedirs(dir, exist_ok=True)` is the standard way to ensure output directory exists
+  - Transcribe/save logic is duplicated between first pass and retry loop — could be extracted into a helper if more retry phases are added
+  - The `transcribe_file()` returns `None` on failure (format mismatch, oversized, or API error), which allows clean boolean checks in the batch loop
+---
