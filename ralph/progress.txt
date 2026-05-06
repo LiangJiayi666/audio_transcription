@@ -44,3 +44,15 @@ Started: Wed May  6 10:00:00 CST 2026
   - Transcribe/save logic is duplicated between first pass and retry loop — could be extracted into a helper if more retry phases are added
   - The `transcribe_file()` returns `None` on failure (format mismatch, oversized, or API error), which allows clean boolean checks in the batch loop
 ---
+
+## 2026-05-06 12:30 - US-004
+- Verified all CLI entry point acceptance criteria were already met by the `__main__` block (added during US-002/US-003)
+- `python main.py` entry point: loads API key → validates input/ → creates output/ → batch transcribes with progress → prints summary
+- Pre-flight checks: groq_key.md existence/non-empty, input/ has audio files (both with clear error messages and exit codes)
+- Progress display: `[1/3] 正在转写 xxx.mp3... ✓` with `flush=True` for real-time output
+- Files changed: ralph/prd.json (US-004 passes → true)
+- **Learnings for future iterations:**
+  - The `__main__` block was incrementally built across US-002 and US-003 — by the time US-004 was reached, it was already complete
+  - Exit codes: `sys.exit(1)` for errors, `sys.exit(0)` for empty input directory (not an error, just nothing to do)
+  - Use `flush=True` on print statements to ensure real-time progress output in terminal
+---
