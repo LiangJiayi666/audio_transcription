@@ -1,3 +1,20 @@
 # Ralph Progress Log
 Started: Wed May  6 10:00:00 CST 2026
+
+## Codebase Patterns
+- API key stored in `groq_key.md` first line, read via `load_api_key()` in `main.py`
+- Groq API accessed via `openai.OpenAI` client with custom `base_url`
+- PRD stored in `ralph/prd.json`, progress in `ralph/progress.txt`
+
+---
+
+## 2026-05-06 10:50 - US-001
+- Created `requirements.txt` with `openai>=1.0.0` dependency
+- Created `main.py` with `load_api_key()` function reading from `groq_key.md`
+- Created `README.md` with install and usage instructions
+- `.gitignore` already included `groq_key.md` from initial commit
+- **Learnings for future iterations:**
+  - `groq_key.md` must already exist for main.py to run (created separately by user)
+  - System Python (PEP 668) requires `--break-system-packages` for pip install; consider venv for production use
+  - `openai>=2.0` uses new client interface, compatible with `https://api.groq.com/openai/v1` base_url
 ---
