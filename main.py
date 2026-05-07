@@ -9,6 +9,7 @@
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -28,8 +29,10 @@ ARCHIVE_FORMATS = {".zip", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
 INPUT_DIR = "input"
 OUTPUT_DIR = "output"
-MAX_RETRY_ROUNDS = 2
+DONE_DIR = "done"
+MAX_RETRY_ROUNDS = 5
 RETRY_DELAY = 2
+RATE_LIMIT_BACKOFF = 30  # base seconds to wait on 429, doubled each retry
 TEMP_DIR = None  # global temp dir for this run
 
 
@@ -37,7 +40,8 @@ TEMP_DIR = None  # global temp dir for this run
 
 def load_api_key() -> str:
     if not os.path.isfile(GROQ_KEY_FILE):
-        print(f"错误: 找不到 {GROQ_KEY_FILE} 文件，请创建该文件并写入 API key。")
+        print(f"错误: 找不到 {GROQ_KEY_FILE} 文件。")
+        print(f"请复制 {GROQ_KEY_FILE.replace('.md', '.example.md')} 为 {GROQ_KEY_FILE} 并写入您的 Groq API Key。")
         sys.exit(1)
     with open(GROQ_KEY_FILE, "r") as f:
         key = f.readline().strip()
@@ -59,6 +63,15 @@ def require_ffmpeg():
         if shutil.which(cmd) is None:
             print(f"错误: 需要 {cmd}，请先安装 ffmpeg:  sudo apt install -y ffmpeg")
             sys.exit(1)
+
+
+def sanitize_path_for_filename(rel_path: str) -> str:
+    """将相对路径转换成安全的文件名：去掉扩展名，把路径分隔符和非法字符替换为下划线。"""
+    name = os.path.splitext(rel_path)[0]
+    name = name.replace(os.sep, '_').replace('/', '_').replace('\\', '_')
+    name = re.sub(r'[<>:"|?*]', '_', name)
+    name = re.sub(r'_+', '_', name)
+    return name.strip('_')
 
 
 # ─── archive extraction ─────────────────────────────────────────────────────
@@ -104,10 +117,11 @@ def extract_archive(archive_path: str, dest_dir: str) -> list[str]:
         return []
 
 
-def process_archives(input_dir: str) -> list[str]:
-    """Extract all archives found in input_dir, returns paths of extracted audio files.
-    Archives themselves are skipped from direct transcription."""
+def process_archives(input_dir: str) -> tuple[list[str], dict[str, str]]:
+    """Extract all archives found in input_dir, returns (paths of extracted audio files,
+    dict mapping archive_path -> extracted_dir)."""
     audio_files = []
+    archive_map = {}
     for name in sorted(os.listdir(input_dir)):
         path = os.path.join(input_dir, name)
         if not os.path.isfile(path):
@@ -123,7 +137,8 @@ def process_archives(input_dir: str) -> list[str]:
             os.makedirs(extract_to, exist_ok=True)
             extracted = extract_archive(path, extract_to)
             audio_files.extend(extracted)
-    return audio_files
+            archive_map[os.path.abspath(path)] = os.path.abspath(extract_to)
+    return audio_files, archive_map
 
 
 # ─── file discovery ──────────────────────────────────────────────────────────
@@ -146,6 +161,45 @@ def find_audio_files(directory: str, paths_from_archive: list[str] = None) -> li
                     found.add(os.path.abspath(os.path.join(root, fname)))
 
     return sorted(found)
+
+
+def get_audio_source(audio_path: str, input_dir: str, archive_map: dict[str, str]) -> dict:
+    """Determine the source group an audio file belongs to.
+
+    Returns dict with:
+      rel:      relative path from input_dir (for output naming)
+      group:    group key string
+      type:     'file' | 'dir' | 'archive'
+      to_move:  list of paths to move to done/ when fully processed
+    """
+    rel = os.path.relpath(audio_path, input_dir)
+    abs_path = os.path.abspath(audio_path)
+
+    for archive_path, extract_dir in archive_map.items():
+        if abs_path.startswith(extract_dir + os.sep):
+            return {
+                'rel': rel,
+                'group': f"archive:{archive_path}",
+                'type': 'archive',
+                'to_move': [archive_path, extract_dir],
+            }
+
+    parts = rel.split(os.sep)
+    if len(parts) > 1:
+        top_dir = os.path.abspath(os.path.join(input_dir, parts[0]))
+        return {
+            'rel': rel,
+            'group': f"dir:{top_dir}",
+            'type': 'dir',
+            'to_move': [top_dir],
+        }
+
+    return {
+        'rel': rel,
+        'group': f"file:{abs_path}",
+        'type': 'file',
+        'to_move': [abs_path],
+    }
 
 
 # ─── audio splitting ────────────────────────────────────────────────────────
@@ -211,6 +265,18 @@ def split_audio(filepath: str, max_bytes: int, temp_dir: str) -> list[tuple[str,
 
 # ─── transcription ──────────────────────────────────────────────────────────
 
+def _extract_retry_seconds(error_message: str) -> int:
+    """Parse retry-after hint from Groq rate-limit error messages like
+    'Please try again in 8m35s.' or 'Please try again in 45s.'"""
+    match = re.search(r"try again in (\d+)m(\d+)s", error_message)
+    if match:
+        return int(match.group(1)) * 60 + int(match.group(2))
+    match = re.search(r"try again in (\d+)s", error_message)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
 def transcribe_file(client: OpenAI, audio_path: str) -> list | None:
     ext = os.path.splitext(audio_path)[1].lower()
     if ext not in SUPPORTED_FORMATS:
@@ -218,19 +284,40 @@ def transcribe_file(client: OpenAI, audio_path: str) -> list | None:
 
     size = os.path.getsize(audio_path)
     if size > MAX_FILE_SIZE:
-        # Should have been split already; if we reach here, something's wrong
         size_mb = size / (1024 * 1024)
         print(f"  错误: 文件 {size_mb:.1f}MB 超过 25MB 限制，且未能切割。")
         return None
 
-    with open(audio_path, "rb") as f:
-        transcription = client.audio.transcriptions.create(
-            model=GROQ_MODEL,
-            file=f,
-            response_format="verbose_json",
-            language="zh",
-        )
-    return transcription.segments
+    last_error = None
+    for attempt in range(MAX_RETRY_ROUNDS + 1):
+        try:
+            with open(audio_path, "rb") as f:
+                transcription = client.audio.transcriptions.create(
+                    model=GROQ_MODEL,
+                    file=f,
+                    response_format="verbose_json",
+                    language="zh",
+                )
+            return transcription.segments
+        except Exception as e:
+            last_error = e
+            error_str = str(e)
+            is_rate_limit = "rate_limit" in error_str.lower() or "429" in error_str
+
+            if attempt < MAX_RETRY_ROUNDS:
+                if is_rate_limit:
+                    wait = _extract_retry_seconds(error_str)
+                    if wait == 0:
+                        wait = RATE_LIMIT_BACKOFF * (2 ** attempt)
+                    print(f"  [速率限制，等待 {wait}s 后重试...]")
+                else:
+                    wait = RETRY_DELAY * (2 ** attempt)
+                    print(f"  [错误，{wait}s 后重试 ({attempt + 1}/{MAX_RETRY_ROUNDS})...]")
+                time.sleep(wait)
+            else:
+                print(f"  [重试耗尽: {error_str[:120]}]")
+
+    return None
 
 
 def format_markdown(segments: list, title: str) -> str:
@@ -300,7 +387,7 @@ def run_pipeline():
 
     # Step 1: Extract archives, if any
     print("\n--- 扫描压缩包 ---")
-    extracted_paths = process_archives(INPUT_DIR)
+    extracted_paths, archive_map = process_archives(INPUT_DIR)
 
     # Step 2: Find all audio files (incl. extracted ones, recursive)
     print("\n--- 扫描音频文件 ---")
@@ -311,6 +398,17 @@ def run_pipeline():
         print(f"支持格式: {', '.join(SUPPORTED_FORMATS)}")
         return
 
+    # Step 2.5: Build source group info for each file
+    file_info = {}   # audio_path -> source dict
+    groups = {}      # group_key -> {'type': ..., 'to_move': [...], 'files': set()}
+    for ap in audio_files:
+        src = get_audio_source(ap, INPUT_DIR, archive_map)
+        file_info[ap] = src
+        gk = src['group']
+        if gk not in groups:
+            groups[gk] = {'type': src['type'], 'to_move': src['to_move'], 'files': set()}
+        groups[gk]['files'].add(ap)
+
     total = len(audio_files)
     print(f"发现 {total} 个音频文件\n")
 
@@ -320,19 +418,20 @@ def run_pipeline():
 
     success = 0
     failed_files = []
-    # Track group info: original basename -> output path (for merged results)
-    # Files from splitting share the same original base name
+
+    def make_out_name(audio_path):
+        safe = sanitize_path_for_filename(file_info[audio_path]['rel'])
+        return safe + ".md" if safe else os.path.splitext(os.path.basename(audio_path))[0] + ".md"
 
     for i, audio_path in enumerate(audio_files):
-        filename = os.path.basename(audio_path)
         display_name = os.path.relpath(audio_path, INPUT_DIR)
         print(f"[{i + 1}/{total}] 正在转写 {display_name}...", end=" ", flush=True)
 
         segments = process_single_file(client, audio_path)
         if segments is not None:
-            out_name = os.path.splitext(filename)[0] + ".md"
+            out_name = make_out_name(audio_path)
             out_path = os.path.join(OUTPUT_DIR, out_name)
-            md_content = format_markdown(segments, os.path.splitext(filename)[0])
+            md_content = format_markdown(segments, os.path.splitext(os.path.basename(audio_path))[0])
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write(md_content)
             print("✓")
@@ -341,22 +440,23 @@ def run_pipeline():
             print("✗")
             failed_files.append(audio_path)
 
-    # Step 4: Retry failures
+    # Step 4: Retry failures with growing delay
     for round_num in range(1, MAX_RETRY_ROUNDS + 1):
         if not failed_files:
             break
-        print(f"\n--- 第 {round_num} 轮重试 ({len(failed_files)} 个文件) ---")
-        time.sleep(RETRY_DELAY)
+        delay = RETRY_DELAY * (2 ** (round_num - 1))
+        print(f"\n--- 第 {round_num} 轮重试 ({len(failed_files)} 个文件, 等待 {delay}s) ---")
+        time.sleep(delay)
 
         still_failed = []
         for audio_path in failed_files:
-            filename = os.path.basename(audio_path)
-            print(f"  正在重试 {filename}...", end=" ", flush=True)
+            display_name = os.path.relpath(audio_path, INPUT_DIR)
+            print(f"  正在重试 {display_name}...", end=" ", flush=True)
             segments = process_single_file(client, audio_path)
             if segments is not None:
-                out_name = os.path.splitext(filename)[0] + ".md"
+                out_name = make_out_name(audio_path)
                 out_path = os.path.join(OUTPUT_DIR, out_name)
-                md_content = format_markdown(segments, os.path.splitext(filename)[0])
+                md_content = format_markdown(segments, os.path.splitext(os.path.basename(audio_path))[0])
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(md_content)
                 print("✓")
@@ -366,16 +466,37 @@ def run_pipeline():
                 still_failed.append(audio_path)
         failed_files = still_failed
 
-    # Step 5: Cleanup temp files
+    # Step 5: Move fully-processed sources to done/
+    os.makedirs(DONE_DIR, exist_ok=True)
+    failed_set = set(failed_files)
+    moved = 0
+    for gk, g in groups.items():
+        if not (g['files'] & failed_set):
+            for src_path in g['to_move']:
+                if os.path.exists(src_path):
+                    dst = os.path.join(DONE_DIR, os.path.basename(src_path))
+                    if os.path.exists(dst):
+                        # If destination exists, remove it first (handle re-runs)
+                        if os.path.isdir(dst):
+                            shutil.rmtree(dst, ignore_errors=True)
+                        else:
+                            os.remove(dst)
+                    shutil.move(src_path, dst)
+                    print(f"  已移动: {os.path.basename(src_path)} → done/")
+                    moved += 1
+    if moved:
+        print()
+
+    # Step 6: Cleanup temp files
     cleanup_temp()
 
     # Report
-    print(f"\n{'=' * 40}")
+    print(f"{'=' * 40}")
     print(f"转写完成！成功: {success}, 失败: {len(failed_files)}")
     if failed_files:
         print("失败文件:")
         for f in failed_files:
-            print(f"  - {os.path.basename(f)}")
+            print(f"  - {os.path.relpath(f, INPUT_DIR)}")
     print(f"Markdown 输出保存在 {OUTPUT_DIR}/")
 
 
