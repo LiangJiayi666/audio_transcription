@@ -1,6 +1,21 @@
 groq_key.md
+deepseek_key.md
 __pycache__/
 *.pyc
 .env
-input/
+venv/
+
+# User data directories
 output/
+output - 副本/
+done/
+summary/
+
+# Keep input/ folder but ignore its contents
+input/*
+!input/.gitkeep
+
+# OS junk
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
