@@ -2,3 +2,5 @@ groq_key.md
 __pycache__/
 *.pyc
 .env
+input/
+output/
