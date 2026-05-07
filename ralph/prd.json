@@ -15,7 +15,7 @@
         "脚本无 import 或语法错误"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -32,7 +32,7 @@
         "脚本无 import 或语法错误"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -48,7 +48,7 @@
         "脚本无 import 或语法错误"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -64,7 +64,7 @@
         "脚本无 import 或语法错误"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]
